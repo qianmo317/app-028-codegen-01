@@ -8,15 +8,26 @@ import {
   allPapers,
   allSizes,
   getTask,
+  makeRefResolver,
   makeThumbResolver,
   manualPlacementsOf,
   resetManual,
   setManual,
   sheetsOf,
   photoVersion,
+  targetPpiOf,
+  blockOf,
 } from '../store'
 import { comparePapers, computeCost } from '../logic/cost'
 import { findPhotoSize, groupsFromTask, resolvePaper, sizeLabel } from '../logic/library'
+import {
+  evaluateSheets,
+  gapText,
+  levelLabel,
+  summarize,
+  type SharpEval,
+  type SharpLevel,
+} from '../logic/preflight'
 import { formatCents, formatPercent } from '../logic/units'
 import type { PaperCompare } from '../logic/cost'
 import type { Placement, Task } from '../logic/types'
@@ -43,6 +54,46 @@ const rawSteps = computed(() => sheets.value.reduce((acc, s) => acc + s.rawCutCo
 const thumbs = computed(() => {
   void photoVersion.value
   return task.value ? makeThumbResolver(task.value, sheets.value) : () => undefined
+})
+
+/** 印前预检落版复核：每张照片按「最终落在哪张纸、实际印成多大」重算一遍 */
+const preflightMap = computed<Map<number, SharpEval>>(() => {
+  void photoVersion.value
+  const t = task.value
+  if (!t) return new Map()
+  const refOf = makeRefResolver(t, sheets.value)
+  return evaluateSheets(sheets.value, refOf, targetPpiOf(t))
+})
+
+const preflightSummary = computed(() =>
+  task.value ? summarize([...preflightMap.value.values()], blockOf(task.value)) : undefined,
+)
+
+function levelOfPlacement(p: Placement): SharpLevel | undefined {
+  return preflightMap.value.get(p.seq)?.level
+}
+
+function chipOfPlacement(p: Placement): string | undefined {
+  const e = preflightMap.value.get(p.seq)
+  return e?.ppi !== undefined ? `${e.ppi}` : undefined
+}
+
+/** 当前纸张上需要处理的照片（warn/bad），给右侧复核卡用 */
+const actionRows = computed(() => {
+  const rows: Array<{ seq: number; sheetIndex: number; eval: SharpEval; sizeName: string }> = []
+  const t = task.value
+  if (!t) return rows
+  for (const s of sheets.value) {
+    for (const p of s.placements) {
+      const e = preflightMap.value.get(p.seq)
+      if (!e || (e.level !== 'bad' && e.level !== 'warn')) continue
+      const item = t.items.find((i) => i.id === p.itemId)
+      const size = item ? findPhotoSize(allSizes.value, item.sizeId) : undefined
+      rows.push({ seq: p.seq, sheetIndex: s.index, eval: e, sizeName: size?.name ?? `${p.w.toFixed(0)}×${p.h.toFixed(0)}mm` })
+    }
+  }
+  rows.sort((a, b) => (a.eval.level === b.eval.level ? a.seq - b.seq : a.eval.level === 'bad' ? -1 : 1))
+  return rows
 })
 
 /** 拖动中用本地覆盖，避免每帧全量校验 */
@@ -276,9 +327,29 @@ watch(
       <span class="badge">{{ totalPhotos }} 张照片</span>
       <span class="badge">{{ sheets.length }} 张相纸</span>
       <span class="badge">{{ totalSteps }} 刀（未合并 {{ rawSteps }} 刀）</span>
+      <span
+        v-if="preflightSummary"
+        class="badge sharp"
+        :class="
+          preflightSummary.blocked
+            ? 'sharp-bad'
+            : preflightSummary.action
+              ? 'sharp-warn'
+              : 'sharp-ok'
+        "
+        :title="`目标 ${targetPpiOf(task)}ppi`"
+      >
+        预检 {{ preflightSummary.ok }} 过 / {{ preflightSummary.action }} 待处理
+      </span>
       <div class="spacer"></div>
       <button class="btn" @click="goto('cut')">裁切步骤 →</button>
-      <button class="btn primary" @click="goto('export')">导出 1:1 →</button>
+      <button
+        class="btn primary"
+        :class="{ danger: preflightSummary?.blocked }"
+        @click="goto('export')"
+      >
+        导出 1:1 →
+      </button>
     </div>
 
     <div v-if="localMsg" class="note">{{ localMsg }}</div>
@@ -321,6 +392,8 @@ watch(
               draggable
               :show-cut-labels="true"
               :thumb-of="thumbs"
+              :level-of="levelOfPlacement"
+              :chip-of="chipOfPlacement"
               @move="onMove"
               @moveend="onMoveEnd"
               @select="(seq) => (selectedSeq = seq)"
@@ -330,6 +403,9 @@ watch(
             <span><i style="background: #9aa6b4"></i>切割线</span>
             <span><i style="background: #6d7c8f"></i>照片边界</span>
             <span><i style="background: #c3ccd9"></i>安全边</span>
+            <span class="sharp-dot sharp-ok">●</span> 达标
+            <span class="sharp-dot sharp-warn">●</span> 临界
+            <span class="sharp-dot sharp-bad">●</span> 不达标
             <span>↻ = 已旋转 90°</span>
           </div>
         </div>
@@ -344,10 +420,15 @@ watch(
                 <th class="num">位置 x/y mm</th>
                 <th class="num">宽×高 mm</th>
                 <th>旋转</th>
+                <th>印前预检</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="p in displaySheet?.placements ?? []" :key="p.seq">
+              <tr
+                v-for="p in displaySheet?.placements ?? []"
+                :key="p.seq"
+                @click="selectedSeq = p.seq"
+              >
                 <td class="num">#{{ p.seq }}</td>
                 <td>
                   {{
@@ -362,6 +443,21 @@ watch(
                 <td class="num">{{ p.x.toFixed(1) }} / {{ p.y.toFixed(1) }}</td>
                 <td class="num">{{ p.w.toFixed(1) }}×{{ p.h.toFixed(1) }}</td>
                 <td>{{ p.rotated ? '90°' : '—' }}</td>
+                <td>
+                  <template v-if="preflightMap.get(p.seq) as SharpEval">
+                    <span
+                      class="badge sharp"
+                      :class="`sharp-${(preflightMap.get(p.seq) as SharpEval).level}`"
+                      >{{ levelLabel((preflightMap.get(p.seq) as SharpEval).level) }}</span
+                    >
+                    <span class="mono" style="font-size: 11px; color: var(--ink-2); margin-left: 4px">
+                      <template v-if="(preflightMap.get(p.seq) as SharpEval).ppi !== undefined">
+                        {{ (preflightMap.get(p.seq) as SharpEval).ppi }}ppi ·
+                        {{ gapText(preflightMap.get(p.seq) as SharpEval) }}
+                      </template>
+                    </span>
+                  </template>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -369,6 +465,55 @@ watch(
       </div>
 
       <div class="stack">
+        <div class="card">
+          <h3>
+            印前预检复核（落版后）
+            <span class="badge">目标 {{ targetPpiOf(task) }}ppi</span>
+          </h3>
+          <div class="card-sub">
+            按每张照片最终落在哪张纸、实际印成多大（含旋转）重新计算；微调位置/尺寸后自动复核
+          </div>
+          <div v-if="preflightSummary" class="row" style="margin-bottom: 8px">
+            <span class="badge sharp sharp-ok">过关 {{ preflightSummary.ok }}</span>
+            <span class="badge sharp sharp-warn">临界 {{ preflightSummary.warn }}</span>
+            <span class="badge sharp sharp-bad">不达标 {{ preflightSummary.bad }}</span>
+            <span class="badge sharp sharp-unknown">无底片 {{ preflightSummary.unknown }}</span>
+          </div>
+          <div v-if="preflightSummary?.blocked" class="note danger">
+            本机设置为「拦住不达标项」：{{ preflightSummary.action }} 张照片低于目标
+            {{ targetPpiOf(task) }}ppi，导出会被停用。请换更大像素的底片，或回新建页把对应项调小
+          </div>
+          <div v-else-if="preflightSummary?.action" class="note warn">
+            {{ preflightSummary.action }} 张照片清晰度临界/不达标（未开启拦截，可以继续，但建议先处理）
+          </div>
+          <div v-else class="note ok">已导入底片的照片全部达到目标清晰度</div>
+          <table v-if="actionRows.length" class="data" style="margin-top: 8px">
+            <thead>
+              <tr>
+                <th class="num">编号</th>
+                <th class="num">纸</th>
+                <th>尺寸</th>
+                <th class="num">实际 ppi</th>
+                <th>缺口</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in actionRows" :key="r.seq">
+                <td class="num">#{{ r.seq }}</td>
+                <td class="num">第 {{ r.sheetIndex + 1 }} 张</td>
+                <td>{{ r.sizeName }}</td>
+                <td class="num">
+                  <span class="badge sharp" :class="`sharp-${r.eval.level}`">{{ r.eval.ppi }}</span>
+                </td>
+                <td>{{ gapText(r.eval) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="actionRows.length" class="note" style="margin-top: 6px">
+            {{ actionRows[0].eval.advice }}
+          </div>
+        </div>
+
         <div class="card">
           <h3>利用率与张数</h3>
           <UtilizationBar

@@ -22,6 +22,10 @@ const props = withDefaults(
     footerText?: string
     thumbOf?: (p: Placement) => string | undefined
     labelOf?: (itemId: string) => string
+    /** 印前预检：按 placement 返回危险程度，用于纸面着色 */
+    levelOf?: (p: Placement) => 'ok' | 'warn' | 'bad' | 'unknown' | undefined
+    /** 印前预检：placement 角标文案（如 240ppi） */
+    chipOf?: (p: Placement) => string | undefined
   }>(),
   {
     safeEdgeMm: 3,
@@ -40,6 +44,8 @@ const props = withDefaults(
     footerText: '',
     thumbOf: undefined,
     labelOf: undefined,
+    levelOf: undefined,
+    chipOf: undefined,
   },
 )
 
@@ -177,6 +183,11 @@ const headerFontSize = computed(() => {
 })
 
 const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
+
+/** 小矩形（1 寸证件照）上不叠 ppi 角标，避免遮住编号 */
+function showChip(p: Placement): boolean {
+  return p.w * props.scale >= 44 && p.h * props.scale >= 34
+}
 </script>
 
 <template>
@@ -213,7 +224,10 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
       v-for="p in sheet.placements"
       :key="p.seq"
       class="ph"
-      :class="{ draggable, invalid, dragging: dragSeq === p.seq }"
+      :class="[
+        { draggable, invalid, dragging: dragSeq === p.seq },
+        levelOf && levelOf(p) ? `tint-${levelOf(p)}` : '',
+      ]"
       :style="phStyle(p)"
       @pointerdown="onPointerDown($event, p)"
       @pointermove="onPointerMove"
@@ -227,6 +241,7 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
           {{ p.w.toFixed(0) }}×{{ p.h.toFixed(0) }}<template v-if="p.rotated">↻</template>
         </span>
       </template>
+      <span v-if="chipOf && chipOf(p) && showChip(p)" class="sharp-chip">{{ chipOf(p) }}</span>
     </div>
 
     <template v-if="showCuts">

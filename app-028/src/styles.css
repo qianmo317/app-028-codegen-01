@@ -367,6 +367,91 @@ table.data tr:hover td {
   color: var(--brand-dark);
 }
 
+/* ---------- 印前清晰度预检 ---------- */
+.badge.sharp {
+  font-weight: 600;
+}
+.badge.sharp-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.badge.sharp-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.badge.sharp-bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.badge.sharp-unknown {
+  background: var(--line-2);
+  color: var(--ink-3);
+}
+.preflight-detail {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.preflight-advice {
+  font-family: var(--font-sans);
+  color: var(--ink-3);
+}
+.sharp-text-ok {
+  color: var(--ok);
+}
+.sharp-text-warn {
+  color: var(--warn);
+}
+.sharp-text-bad {
+  color: var(--danger);
+}
+
+/* 纸面视图：按危险程度着色（屏幕预览专用，打印时去掉） */
+.ph.tint-ok {
+  border-color: var(--ok);
+  background: rgba(26, 127, 75, 0.1);
+}
+.ph.tint-warn {
+  border-color: var(--warn);
+  background: rgba(178, 106, 0, 0.13);
+  box-shadow: inset 0 0 0 1px rgba(178, 106, 0, 0.35);
+}
+.ph.tint-bad {
+  border-color: var(--danger);
+  background: rgba(198, 40, 40, 0.15);
+  box-shadow: inset 0 0 0 1px rgba(198, 40, 40, 0.4);
+}
+.ph.tint-unknown {
+  border-color: #9aa6b4;
+  background: rgba(138, 150, 165, 0.08);
+}
+.ph .sharp-chip {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  line-height: 1.4;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.88);
+  pointer-events: none;
+}
+@media print {
+  .ph.tint-ok,
+  .ph.tint-warn,
+  .ph.tint-bad,
+  .ph.tint-unknown {
+    border-color: #6d7c8f;
+    background: rgba(31, 111, 235, 0.08);
+    box-shadow: none;
+  }
+  .ph .sharp-chip {
+    display: none;
+  }
+}
+
 .note {
   border-radius: 6px;
   padding: 8px 10px;
@@ -541,6 +626,19 @@ table.data tr:hover td {
   height: 3px;
   vertical-align: middle;
   margin-right: 4px;
+}
+.sharp-dot {
+  font-size: 12px;
+  line-height: 1;
+}
+.sharp-dot.sharp-ok {
+  color: var(--ok);
+}
+.sharp-dot.sharp-warn {
+  color: var(--warn);
+}
+.sharp-dot.sharp-bad {
+  color: var(--danger);
 }
 
 /* ---------- 切割步骤 ---------- */

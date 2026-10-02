@@ -21,6 +21,12 @@ import {
 } from '../store'
 import { findPhotoSize, newId } from '../logic/library'
 import { formatCents, formatPercent } from '../logic/units'
+import {
+  evaluateItem,
+  gapText,
+  levelLabel,
+  type SharpEval,
+} from '../logic/preflight'
 import type { Item, Paper, PhotoRef, Task } from '../logic/types'
 
 const router = useRouter()
@@ -44,6 +50,8 @@ const draft = reactive({
   allowRotate: settings.value.allowRotate,
   headerText: '',
   footerText: '',
+  targetPpi: settings.value.targetPpi,
+  blockBelowTarget: settings.value.blockBelowTarget,
 })
 
 const error = ref('')
@@ -71,6 +79,52 @@ const usableText = computed(() => {
 })
 
 const totalQty = computed(() => draft.items.reduce((a, i) => a + Math.max(0, i.qty), 0))
+
+/** 每行清单的印前预检结果（对标称尺寸评估，允许旋转时取最有利的方向） */
+const itemChecks = computed<Map<string, SharpEval>>(() => {
+  void photoVersion.value
+  const map = new Map<string, SharpEval>()
+  for (const item of draft.items) {
+    const s = findPhotoSize(allSizes.value, item.sizeId)
+    if (!s) continue
+    map.set(
+      item.id,
+      evaluateItem(item, s, {
+        targetPpi: draft.targetPpi,
+        allowRotate: draft.allowRotate && item.rotateAllowed,
+        candidates: allSizes.value,
+      }),
+    )
+  }
+  return map
+})
+
+const checkCounts = computed(() => {
+  const c = { ok: 0, warn: 0, bad: 0, unknown: 0 }
+  for (const item of draft.items) {
+    const e = itemChecks.value.get(item.id)
+    if (!e) continue
+    c[e.level]++
+  }
+  return c
+})
+
+const blockingRows = computed(() =>
+  draft.blockBelowTarget
+    ? draft.items.filter((i) => {
+        const e = itemChecks.value.get(i.id)
+        return e && (e.level === 'bad' || e.level === 'warn')
+      })
+    : [],
+)
+
+function fmtMm(n: number): string {
+  return (Math.round(n * 10) / 10).toString()
+}
+
+function checkOf(item: Item): SharpEval | undefined {
+  return itemChecks.value.get(item.id)
+}
 
 function addItem(sizeId?: string) {
   const size = sizeId ?? allSizes.value[0]?.id
@@ -196,6 +250,19 @@ function submit() {
     error.value = '照片数量必须大于 0'
     return
   }
+  // 预检目标清晰度与拦截开关存为本机设置，下次新建沿用（即使本次被拦住也保存偏好）
+  settings.value.targetPpi = draft.targetPpi
+  settings.value.blockBelowTarget = draft.blockBelowTarget
+  if (blockingRows.value.length) {
+    const names = blockingRows.value
+      .slice(0, 3)
+      .map((i) => findPhotoSize(allSizes.value, i.sizeId)?.name ?? '自定义')
+      .join('、')
+    error.value = `印前预检拦住 ${blockingRows.value.length} 项不达标底片（${names}${
+      blockingRows.value.length > 3 ? ' 等' : ''
+    }）：请按建议换更大像素的底片或把该张调小；也可在「④ 印前预检」里关闭拦截后继续`
+    return
+  }
   const task: Task = createTask({
     name: draft.name || undefined,
     paperId: draft.paperId,
@@ -207,6 +274,8 @@ function submit() {
     allowRotate: draft.allowRotate,
     headerText: draft.headerText,
     footerText: draft.footerText,
+    targetPpi: draft.targetPpi,
+    blockBelowTarget: draft.blockBelowTarget,
   })
   const err = runPack(task)
   if (err) {
@@ -233,6 +302,9 @@ function taskPaperName(t: Task) {
       <span class="badge brand">相纸 + 照片清单</span>
       <div class="spacer"></div>
       <span class="badge">共 {{ totalQty }} 张照片</span>
+      <span class="badge sharp" :class="checkCounts.bad ? 'sharp-bad' : checkCounts.warn ? 'sharp-warn' : 'sharp-ok'">
+        印前预检 {{ checkCounts.ok }} 过 / {{ checkCounts.warn + checkCounts.bad }} 待处理
+      </span>
     </div>
 
     <div v-if="error" class="note danger">{{ error }}</div>
@@ -316,6 +388,34 @@ function taskPaperName(t: Task) {
         </div>
 
         <div class="card">
+          <h3>④ 印前预检（清晰度）</h3>
+          <div class="card-sub">
+            读入底片像素后，按每种要印的尺寸模拟「填满裁切」，算出实际 ppi；目标 ppi 与拦截选择存为本机设置
+          </div>
+          <div class="stack">
+            <label class="field" style="max-width: 220px">
+              目标清晰度（ppi）
+              <select v-model.number="draft.targetPpi">
+                <option :value="150">150 ppi（远观海报）</option>
+                <option :value="200">200 ppi（普通近看）</option>
+                <option :value="240">240 ppi（冲印店常用下限）</option>
+                <option :value="300">300 ppi（精印 / 证件照，推荐）</option>
+                <option :value="350">350 ppi（高清相纸）</option>
+                <option :value="600">600 ppi（极致锐度）</option>
+              </select>
+            </label>
+            <label class="check">
+              <input v-model="draft.blockBelowTarget" type="checkbox" />
+              拦住不达标的项（低于目标 ppi 时不能继续排样/导出）
+            </label>
+            <div class="note">
+              评级：≥{{ draft.targetPpi }}ppi 达标（绿）；≥{{ Math.round(draft.targetPpi * 0.8) }}ppi
+              临界（黄，近看略糊）；更低为不达标（红）。照片只在浏览器内存中读取，不上传、不留副本
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
           <h3>余料库</h3>
           <div class="card-sub">排样剩下的纸边可以登记，下次优先用余料</div>
           <div v-if="!leftovers.length" class="note">暂无登记余料，可在「排样预览」页把剩余纸边登记进来</div>
@@ -364,6 +464,7 @@ function taskPaperName(t: Task) {
                 <th>不拆散</th>
                 <th>底片</th>
                 <th>本机照片文件</th>
+                <th style="width: 210px">印前预检</th>
                 <th></th>
               </tr>
             </thead>
@@ -419,6 +520,32 @@ function taskPaperName(t: Task) {
                   </div>
                 </td>
                 <td>
+                  <template v-if="checkOf(item)">
+                    <div class="row tight" style="align-items: flex-start">
+                      <span class="badge sharp" :class="`sharp-${checkOf(item)!.level}`">{{
+                        levelLabel(checkOf(item)!.level)
+                      }}</span>
+                      <span class="mono" style="font-size: 11px; color: var(--ink-2)">
+                        <template v-if="checkOf(item)!.ppi !== undefined">
+                          {{ checkOf(item)!.ppi }}ppi · {{ gapText(checkOf(item)!) }}
+                        </template>
+                      </span>
+                    </div>
+                    <div
+                      v-if="checkOf(item)!.level !== 'unknown'"
+                      class="mono preflight-detail"
+                      :class="`sharp-text-${checkOf(item)!.level}`"
+                      :title="checkOf(item)!.advice"
+                    >
+                      最多印 {{ fmtMm(Math.min(checkOf(item)!.maxWMm!, checkOf(item)!.maxHMm!)) }}×{{
+                        fmtMm(Math.max(checkOf(item)!.maxWMm!, checkOf(item)!.maxHMm!))
+                      }}mm
+                      <div class="preflight-advice">{{ checkOf(item)!.advice }}</div>
+                    </div>
+                    <div v-else class="mono" style="font-size: 11px; color: var(--ink-3)">导入底片后预检</div>
+                  </template>
+                </td>
+                <td>
                   <button class="btn small danger" @click="removeItem(item.id)">删除</button>
                 </td>
               </tr>
@@ -457,6 +584,17 @@ function taskPaperName(t: Task) {
             开始排样
             <span class="badge">guillotine 约束</span>
           </h3>
+          <div class="row" style="margin-bottom: 8px">
+            <span class="badge sharp sharp-ok">达标 {{ checkCounts.ok }}</span>
+            <span class="badge sharp sharp-warn">临界 {{ checkCounts.warn }}</span>
+            <span class="badge sharp sharp-bad">不达标 {{ checkCounts.bad }}</span>
+            <span class="badge sharp sharp-unknown">无底片 {{ checkCounts.unknown }}</span>
+            <span class="badge">目标 {{ draft.targetPpi }}ppi</span>
+          </div>
+          <div v-if="blockingRows.length" class="note danger" style="margin-bottom: 8px">
+            已拦住 {{ blockingRows.length }} 项不达标底片：按每行「印前预检」里的建议换更大像素的底片或把该张调小，
+            或在「④ 印前预检」关闭拦截
+          </div>
           <div class="row">
             <label class="field" style="max-width: 260px">
               任务名称

@@ -6,11 +6,14 @@ import SheetView from '../components/SheetView.vue'
 import {
   allPapers,
   allSizes,
+  blockOf,
   getTask,
   makePhotoResolver,
+  makeRefResolver,
   makeThumbResolver,
   photoVersion,
   sheetsOf,
+  targetPpiOf,
 } from '../store'
 import { computeCost } from '../logic/cost'
 import { cutListRows, csvBlob } from '../logic/csv'
@@ -18,6 +21,14 @@ import { downloadBlob } from '../logic/image'
 import { findPhotoSize, resolvePaper } from '../logic/library'
 import { buildPdf } from '../logic/pdf'
 import { buildSheetPng } from '../logic/png'
+import {
+  evaluateSheets,
+  gapText,
+  levelLabel,
+  summarize,
+  type SharpEval,
+  type SharpLevel,
+} from '../logic/preflight'
 import { formatCents, formatPercent } from '../logic/units'
 import type { Placement, Task } from '../logic/types'
 
@@ -43,6 +54,81 @@ function photoResolver() {
   return task.value ? makePhotoResolver(task.value, sheets.value) : () => undefined
 }
 
+/** 导出前最后一次印前预检汇总（按最终落版实际尺寸） */
+const preflightMap = computed<Map<number, SharpEval>>(() => {
+  void photoVersion.value
+  const t = task.value
+  if (!t) return new Map()
+  return evaluateSheets(sheets.value, makeRefResolver(t, sheets.value), targetPpiOf(t))
+})
+
+const preflightSummary = computed(() =>
+  task.value ? summarize([...preflightMap.value.values()], blockOf(task.value)) : undefined,
+)
+
+function levelOfPlacement(p: Placement): SharpLevel | undefined {
+  return preflightMap.value.get(p.seq)?.level
+}
+
+function chipOfPlacement(p: Placement): string | undefined {
+  const e = preflightMap.value.get(p.seq)
+  return e?.ppi !== undefined ? `${e.ppi}` : undefined
+}
+
+/** 需要处理的照片行（warn/bad），供导出前明细表使用 */
+const actionPlacements = computed(() => {
+  const rows: Array<{ seq: number; sheetIndex: number; p: Placement; e: SharpEval }> = []
+  for (const s of sheets.value) {
+    for (const p of s.placements) {
+      const e = preflightMap.value.get(p.seq)
+      if (e && (e.level === 'warn' || e.level === 'bad')) rows.push({ seq: p.seq, sheetIndex: s.index, p, e })
+    }
+  }
+  rows.sort((a, b) => (a.e.level === b.e.level ? a.seq - b.seq : a.e.level === 'bad' ? -1 : 1))
+  return rows
+})
+
+/** 导出预检明细 CSV（每张照片：落在哪张纸、实际尺寸、ppi、评级、缺口、建议） */
+function exportPreflightCsv() {
+  const t = task.value
+  if (!t) return
+  const rows: Array<Array<string | number>> = [
+    ['印前预检汇总'],
+    [
+      '目标清晰度 ppi',
+      targetPpiOf(t),
+      '过关',
+      preflightSummary.value?.ok ?? 0,
+      '临界',
+      preflightSummary.value?.warn ?? 0,
+      '不达标',
+      preflightSummary.value?.bad ?? 0,
+      '无底片',
+      preflightSummary.value?.unknown ?? 0,
+    ],
+    [],
+    ['照片编号', '所在相纸', '尺寸', '实际宽 mm', '实际高 mm', '实际 ppi', '评级', '距目标', '建议'],
+  ]
+  for (const s of sheets.value) {
+    for (const p of s.placements) {
+      const e = preflightMap.value.get(p.seq)
+      rows.push([
+        p.seq,
+        s.index + 1,
+        sizeLabelOf(p),
+        p.w.toFixed(1),
+        p.h.toFixed(1),
+        e?.ppi ?? '',
+        e ? levelLabel(e.level) : '',
+        e ? gapText(e) : '',
+        e?.advice ?? '',
+      ])
+    }
+  }
+  downloadBlob(csvBlob(rows), `${t.name}-印前预检.csv`)
+  message.value = '印前预检 CSV 已导出'
+}
+
 function sizeLabelOf(p: Placement): string {
   const t = task.value
   if (!t) return ''
@@ -59,6 +145,12 @@ function guard(): boolean {
   }
   if (!sheets.value.length) {
     message.value = '没有可导出的版面'
+    return false
+  }
+  if (preflightSummary.value?.blocked) {
+    message.value = `印前预检未通过：${preflightSummary.value.action} 张照片低于目标 ${targetPpiOf(
+      task.value,
+    )}ppi，本机设置为拦住不达标项，请换更大像素的底片或把对应照片调小后再导出`
     return false
   }
   return true
@@ -200,6 +292,59 @@ function printView() {
       手工微调后的排样不满足 guillotine 贯通裁切，导出已停用：{{ task.manual?.message }}
     </div>
 
+    <div class="card no-print">
+      <h3>
+        导出前印前预检汇总
+        <span class="badge">目标 {{ task ? targetPpiOf(task) : '—' }}ppi</span>
+      </h3>
+      <div v-if="preflightSummary" class="row" style="margin-bottom: 8px">
+        <span class="badge sharp sharp-ok">过关 {{ preflightSummary.ok }} 张</span>
+        <span class="badge sharp sharp-warn">临界 {{ preflightSummary.warn }} 张</span>
+        <span class="badge sharp sharp-bad">不达标 {{ preflightSummary.bad }} 张</span>
+        <span class="badge sharp sharp-unknown">无底片 {{ preflightSummary.unknown }} 张</span>
+        <div class="spacer"></div>
+        <button class="btn small" @click="exportPreflightCsv">导出预检 CSV</button>
+      </div>
+      <div v-if="preflightSummary?.blocked" class="note danger">
+        本机设置为拦住不达标项：<strong>{{ preflightSummary.action }} 张要处理</strong>（低于
+        {{ task ? targetPpiOf(task) : '' }}ppi），下方导出按钮已停用。请回排样页/新建页换更大像素的底片或把这些张调小
+      </div>
+      <div v-else-if="preflightSummary?.action" class="note warn">
+        {{ preflightSummary.action }} 张临界/不达标（未开启拦截，可强行导出，但印出来可能发糊）；明细见「排样示意图」着色与预检 CSV
+      </div>
+      <div v-else class="note ok">
+        已导入底片的 {{ preflightSummary?.checked ?? 0 }} 张照片全部过关，可以导出
+      </div>
+      <table
+        v-if="preflightSummary && preflightSummary.action > 0"
+        class="data"
+        style="margin-top: 8px"
+      >
+        <thead>
+          <tr>
+            <th class="num">编号</th>
+            <th class="num">纸</th>
+            <th>尺寸</th>
+            <th class="num">实际 ppi</th>
+            <th>缺口</th>
+            <th>建议</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in actionPlacements" :key="r.seq">
+            <td class="num">#{{ r.seq }}</td>
+            <td class="num">第 {{ r.sheetIndex + 1 }} 张</td>
+            <td>{{ sizeLabelOf(r.p) }}</td>
+            <td class="num">
+              <span class="badge sharp" :class="`sharp-${r.e.level}`">{{ r.e.ppi }}</span>
+            </td>
+            <td>{{ gapText(r.e) }}</td>
+            <td style="font-size: 12px">{{ r.e.advice }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <div class="grid sidebar no-print">
       <div class="stack">
         <div class="card">
@@ -215,18 +360,34 @@ function printView() {
               </select>
             </label>
             <div class="row">
-              <button class="btn primary" :disabled="busy" @click="exportPdf">
+              <button
+                class="btn primary"
+                :disabled="busy || !!preflightSummary?.blocked"
+                @click="exportPdf"
+              >
                 导出 1:1 PDF（每张相纸一页 + 校验尺）
               </button>
             </div>
             <div class="row">
-              <button class="btn" :disabled="busy" @click="exportAllPng">导出全部 1:1 PNG</button>
-              <button class="btn" :disabled="busy" @click="exportPng(0)">仅当前第 1 张 PNG</button>
+              <button class="btn" :disabled="busy || !!preflightSummary?.blocked" @click="exportAllPng">
+                导出全部 1:1 PNG
+              </button>
+              <button class="btn" :disabled="busy || !!preflightSummary?.blocked" @click="exportPng(0)">
+                仅当前第 1 张 PNG
+              </button>
             </div>
             <div class="row">
-              <button class="btn" @click="exportCutList">导出切割清单 CSV</button>
+              <button class="btn" :disabled="!!preflightSummary?.blocked" @click="exportCutList">
+                导出切割清单 CSV
+              </button>
               <button class="btn" @click="exportCost">导出成本表 CSV</button>
-              <button class="btn" @click="printView">打印视图（含校验尺）</button>
+              <button
+                class="btn"
+                :disabled="!!preflightSummary?.blocked"
+                @click="printView"
+              >
+                打印视图（含校验尺）
+              </button>
             </div>
           </div>
         </div>
@@ -276,6 +437,15 @@ function printView() {
             <span class="badge">第 {{ s.index + 1 }} 张</span>
             <span class="badge">{{ s.cutSteps.length }} 刀</span>
             <span class="badge">利用率 {{ formatPercent(s.utilization) }}</span>
+            <span
+              v-for="lv in ['bad', 'warn', 'ok', 'unknown'] as const"
+              :key="lv"
+              v-show="s.placements.some((p) => preflightMap.get(p.seq)?.level === lv)"
+              class="badge sharp"
+              :class="`sharp-${lv}`"
+              >{{ levelLabel(lv) }}
+              {{ s.placements.filter((p) => preflightMap.get(p.seq)?.level === lv).length }}</span
+            >
           </div>
           <div class="sheet-wrap">
             <SheetView
@@ -284,6 +454,8 @@ function printView() {
               :safe-edge-mm="task.safeEdgeMm"
               :scale="Math.max(0.5, Math.min(2.2, 700 / paper.wMm))"
               :thumb-of="thumbs"
+              :level-of="levelOfPlacement"
+              :chip-of="chipOfPlacement"
             />
           </div>
         </div>

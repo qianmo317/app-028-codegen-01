@@ -37,6 +37,8 @@ export const DEFAULT_SETTINGS: Settings = {
   safeEdgeMm: 3,
   allowRotate: true,
   exportDpi: 300,
+  targetPpi: 300,
+  blockBelowTarget: true,
 }
 
 export const customPapers = ref<Paper[]>(loadJSON<Paper[]>(KEY.customPapers, []))
@@ -114,6 +116,26 @@ export function makeThumbResolver(task: Task, sheets: Sheet[]) {
   return (p: Placement): string | undefined => resolve(p)?.url
 }
 
+/** placement -> 底片像素信息（不含 URL），用于印前清晰度预检复核 */
+export function makeRefResolver(task: Task, sheets: Sheet[]) {
+  const map = copyIndexMap(sheets)
+  const repeat = new Map(task.items.map((i) => [i.id, i.repeatSamePhoto]))
+  return (p: Placement): PhotoRef | undefined => {
+    const ci = repeat.get(p.itemId) === false ? map.get(p.seq) ?? 0 : 0
+    return getItemPhoto(photoKey(p.itemId, ci))?.ref
+  }
+}
+
+/** 任务生效的预检目标 ppi：建任务时的快照优先，老任务回退本机设置 */
+export function targetPpiOf(task: Task): number {
+  return task.targetPpi ?? settings.value.targetPpi
+}
+
+/** 任务生效的「拦住不达标项」开关：快照优先，老任务回退本机设置 */
+export function blockOf(task: Task): boolean {
+  return task.blockBelowTarget ?? settings.value.blockBelowTarget
+}
+
 export function getTask(id: string): Task | undefined {
   return tasks.value.find((t) => t.id === id)
 }
@@ -132,6 +154,8 @@ export function createTask(partial: Partial<Task> = {}): Task {
     headerText: partial.headerText ?? '',
     footerText: partial.footerText ?? '',
     createdAt: Date.now(),
+    targetPpi: partial.targetPpi,
+    blockBelowTarget: partial.blockBelowTarget,
   }
   tasks.value.unshift(task)
   return task

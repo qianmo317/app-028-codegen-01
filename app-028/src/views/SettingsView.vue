@@ -77,6 +77,36 @@ function reset() {
       </div>
 
       <div class="card">
+        <h3>印前清晰度预检</h3>
+        <div class="card-sub">新建任务时沿用这里的默认值；照片只在浏览器内存里读像素，不上传、不留副本</div>
+        <div class="stack">
+          <label class="field" style="max-width: 260px">
+            目标清晰度（ppi）：{{ settings.targetPpi }} ppi
+            <select v-model.number="settings.targetPpi">
+              <option :value="150">150 ppi（远观海报）</option>
+              <option :value="200">200 ppi（普通近看）</option>
+              <option :value="240">240 ppi（冲印店常用下限）</option>
+              <option :value="300">300 ppi（精印 / 证件照，推荐）</option>
+              <option :value="350">350 ppi（高清相纸）</option>
+              <option :value="600">600 ppi（极致锐度）</option>
+            </select>
+          </label>
+          <div class="note">
+            预检按「填满裁切」模拟：底片先裁到要印尺寸的比例，再算裁切后两轴中较低的实际 ppi。
+            ≥{{ settings.targetPpi }} 为达标，≥{{ Math.round(settings.targetPpi * 0.8) }} 为临界，更低为不达标；
+            不达标项会写明最多能印多大、离目标差多少 ppi/像素，并给出「调小尺寸 / 换更大像素底片」建议
+          </div>
+          <label class="check">
+            <input v-model="settings.blockBelowTarget" type="checkbox" />
+            拦住不达标的项（低于目标 ppi 时不能继续排样、导出按钮停用）
+          </label>
+          <div class="note">
+            关闭后只标红警告、不拦截；未导入底片的项标记为「无底片」，不会被拦截
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>
           第 10 节验收自检
           <span class="row tight">

@@ -125,6 +125,10 @@ export interface Task {
   headerText: string
   footerText: string
   createdAt: number
+  /** 建任务时的印前预检目标清晰度（ppi），缺省回退本机设置 */
+  targetPpi?: number
+  /** 建任务时是否拦截不达标项，缺省回退本机设置 */
+  blockBelowTarget?: boolean
   /** 手工微调过的排样（存在时优先于自动排样结果） */
   manual?: {
     placements: Placement[]
@@ -153,6 +157,10 @@ export interface Settings {
   safeEdgeMm: number
   allowRotate: boolean
   exportDpi: number
+  /** 印前预检目标清晰度（ppi） */
+  targetPpi: number
+  /** 预检不达标（低于目标 ppi）时是否拦住、不允许继续排样/导出 */
+  blockBelowTarget: boolean
 }
 
 export interface PaperTemplate {

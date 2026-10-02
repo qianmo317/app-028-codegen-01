@@ -3,9 +3,10 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SheetView from '../components/SheetView.vue'
 import RulerScale from '../components/RulerScale.vue'
-import { allPapers, getTask, makeThumbResolver, photoVersion, sheetsOf } from '../store'
+import { allPapers, getTask, makeRefResolver, makeThumbResolver, photoVersion, sheetsOf, targetPpiOf } from '../store'
 import { resolvePaper } from '../logic/library'
-import type { CutStep, Task } from '../logic/types'
+import { evaluateSheets, type SharpLevel } from '../logic/preflight'
+import type { CutStep, Placement, Task } from '../logic/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,6 +27,23 @@ const thumbs = computed(() => {
   void photoVersion.value
   return task.value ? makeThumbResolver(task.value, sheets.value) : () => undefined
 })
+
+const preflightMap = computed(() => {
+  void photoVersion.value
+  const t = task.value
+  if (!t) return new Map()
+  return evaluateSheets(sheets.value, makeRefResolver(t, sheets.value), targetPpiOf(t))
+})
+
+function levelOfPlacement(p: Placement): SharpLevel | undefined {
+  return preflightMap.value.get(p.seq)?.level
+}
+
+function chipOfPlacement(p: Placement): string | undefined {
+  return preflightMap.value.get(p.seq)?.ppi !== undefined
+    ? `${preflightMap.value.get(p.seq)!.ppi}`
+    : undefined
+}
 
 const scale = computed(() => {
   const p = paper.value
@@ -154,6 +172,8 @@ function goto(routeName: string) {
               :done-count="step"
               :show-cut-labels="true"
               :thumb-of="thumbs"
+              :level-of="levelOfPlacement"
+              :chip-of="chipOfPlacement"
             />
           </div>
         </div>
