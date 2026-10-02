@@ -8,15 +8,18 @@ import {
   allPapers,
   allSizes,
   getTask,
+  getItemPhotoRef,
   makeThumbResolver,
   manualPlacementsOf,
   resetManual,
   setManual,
   sheetsOf,
   photoVersion,
+  settings,
 } from '../store'
 import { comparePapers, computeCost } from '../logic/cost'
 import { findPhotoSize, groupsFromTask, resolvePaper, sizeLabel } from '../logic/library'
+import { preflightSheets, type PlacementPreflight, type PreflightLevel } from '../logic/preflight'
 import { formatCents, formatPercent } from '../logic/units'
 import type { PaperCompare } from '../logic/cost'
 import type { Placement, Task } from '../logic/types'
@@ -44,6 +47,28 @@ const thumbs = computed(() => {
   void photoVersion.value
   return task.value ? makeThumbResolver(task.value, sheets.value) : () => undefined
 })
+
+/** 排样定稿后的印前复核：按每张照片实际落在哪张纸、实际印成多大（含旋转）重算 */
+const preflight = computed(() => {
+  void photoVersion.value
+  if (!task.value) return undefined
+  return preflightSheets(
+    task.value,
+    sheets.value,
+    allSizes.value,
+    settings.value.targetDpi,
+    settings.value.blockOnPreflightFail,
+    getItemPhotoRef,
+  )
+})
+
+function severityOf(p: Placement): PreflightLevel | undefined {
+  return preflight.value?.bySeq.get(p.seq)?.verdict?.level
+}
+
+function rowOf(seq: number): PlacementPreflight | undefined {
+  return preflight.value?.bySeq.get(seq)
+}
 
 /** 拖动中用本地覆盖，避免每帧全量校验 */
 const displaySheets = computed(() => {
@@ -321,6 +346,7 @@ watch(
               draggable
               :show-cut-labels="true"
               :thumb-of="thumbs"
+              :severity-of="severityOf"
               @move="onMove"
               @moveend="onMoveEnd"
               @select="(seq) => (selectedSeq = seq)"
@@ -331,6 +357,9 @@ watch(
             <span><i style="background: #6d7c8f"></i>照片边界</span>
             <span><i style="background: #c3ccd9"></i>安全边</span>
             <span>↻ = 已旋转 90°</span>
+            <span v-if="preflight && preflight.summary.checked > 0"><i style="background: #2f9e66"></i>清晰度达标</span>
+            <span v-if="preflight && preflight.summary.checked > 0"><i style="background: #d08a1f"></i>偏低</span>
+            <span v-if="preflight && preflight.summary.checked > 0"><i style="background: var(--danger)"></i>严重不足</span>
           </div>
         </div>
 
@@ -344,6 +373,7 @@ watch(
                 <th class="num">位置 x/y mm</th>
                 <th class="num">宽×高 mm</th>
                 <th>旋转</th>
+                <th class="num">清晰度</th>
               </tr>
             </thead>
             <tbody>
@@ -362,6 +392,21 @@ watch(
                 <td class="num">{{ p.x.toFixed(1) }} / {{ p.y.toFixed(1) }}</td>
                 <td class="num">{{ p.w.toFixed(1) }}×{{ p.h.toFixed(1) }}</td>
                 <td>{{ p.rotated ? '90°' : '—' }}</td>
+                <td class="num">
+                  <span
+                    v-if="rowOf(p.seq)?.verdict"
+                    class="badge"
+                    :class="{
+                      ok: rowOf(p.seq)?.verdict?.level === 'pass',
+                      warn: rowOf(p.seq)?.verdict?.level === 'warn',
+                      danger: rowOf(p.seq)?.verdict?.level === 'danger',
+                    }"
+                    :title="rowOf(p.seq)?.verdict?.advice.summary"
+                  >
+                    {{ rowOf(p.seq)?.verdict?.effectiveDpi.toFixed(0) }}dpi
+                  </span>
+                  <span v-else class="badge">未导底片</span>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -369,6 +414,75 @@ watch(
       </div>
 
       <div class="stack">
+        <div class="card">
+          <h3>
+            印前预检复核
+            <span class="row tight">
+              <span class="badge ok">达标 {{ preflight?.summary.passed ?? 0 }}</span>
+              <span class="badge warn">偏低 {{ preflight?.summary.warned ?? 0 }}</span>
+              <span class="badge danger">不足 {{ preflight?.summary.dangers ?? 0 }}</span>
+              <span v-if="(preflight?.summary.noSource ?? 0) > 0" class="badge">
+                未导底片 {{ preflight?.summary.noSource }}
+              </span>
+            </span>
+          </h3>
+          <div class="card-sub">
+            排样定稿后按每张照片最终落在哪张纸、实际印成多大（含旋转）重新复核；目标 {{ settings.targetDpi }}dpi
+          </div>
+          <div v-if="!preflight || preflight.summary.checked === 0" class="note">
+            本任务没有导入底片的印件，未参与清晰度预检（回到新建页可补导底片）
+          </div>
+          <div v-else-if="preflight.summary.toHandle === 0" class="note ok">
+            已复核 {{ preflight.summary.checked }} 张，全部达标；纸面视图绿色边框 = 清晰度合格
+          </div>
+          <template v-else>
+            <div class="note" :class="preflight.summary.dangers > 0 ? 'danger' : 'warn'">
+              {{ preflight.summary.toHandle }} 张要处理（偏低 {{ preflight.summary.warned }}、严重不足
+              {{ preflight.summary.dangers }}），已在纸面视图按黄/红着色
+            </div>
+            <table class="data" style="margin-top: 8px">
+              <thead>
+                <tr>
+                  <th class="num">#</th>
+                  <th class="num">纸</th>
+                  <th class="num">实际尺寸 mm</th>
+                  <th class="num">有效 dpi</th>
+                  <th>最多能印 / 建议</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in preflight.list.filter((x) => !x.verdict?.pass)" :key="r.seq">
+                  <td class="num">{{ r.seq }}</td>
+                  <td class="num">{{ r.sheetIndex + 1 }}</td>
+                  <td class="num">
+                    {{ r.verdict!.printWMm.toFixed(0) }}×{{ r.verdict!.printHMm.toFixed(0) }}
+                  </td>
+                  <td class="num">
+                    <strong :style="{ color: r.verdict!.level === 'danger' ? 'var(--danger)' : 'var(--warn)' }">
+                      {{ r.verdict!.effectiveDpi.toFixed(0) }}
+                    </strong>
+                    <span class="mono" style="color: var(--ink-3)">
+                      /{{ r.verdict!.targetDpi }}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="mono" style="font-size: 12px">
+                      {{ r.verdict!.maxPrintWMm.toFixed(0) }}×{{ r.verdict!.maxPrintHMm.toFixed(0) }}mm
+                      · 差 {{ r.verdict!.dpiShortfall.toFixed(0) }}dpi
+                    </div>
+                    <div style="font-size: 12px">
+                      <strong>{{ r.verdict!.advice.summary }}</strong>
+                      <span v-if="r.verdict!.advice.detail" style="color: var(--ink-2)">
+                        — {{ r.verdict!.advice.detail }}
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </div>
+
         <div class="card">
           <h3>利用率与张数</h3>
           <UtilizationBar

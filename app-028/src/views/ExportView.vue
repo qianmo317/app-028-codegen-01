@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import RulerScale from '../components/RulerScale.vue'
 import SheetView from '../components/SheetView.vue'
@@ -7,9 +7,11 @@ import {
   allPapers,
   allSizes,
   getTask,
+  getItemPhotoRef,
   makePhotoResolver,
   makeThumbResolver,
   photoVersion,
+  settings,
   sheetsOf,
 } from '../store'
 import { computeCost } from '../logic/cost'
@@ -18,6 +20,7 @@ import { downloadBlob } from '../logic/image'
 import { findPhotoSize, resolvePaper } from '../logic/library'
 import { buildPdf } from '../logic/pdf'
 import { buildSheetPng } from '../logic/png'
+import { preflightSheets, type PreflightLevel } from '../logic/preflight'
 import { formatCents, formatPercent } from '../logic/units'
 import type { Placement, Task } from '../logic/types'
 
@@ -43,6 +46,40 @@ function photoResolver() {
   return task.value ? makePhotoResolver(task.value, sheets.value) : () => undefined
 }
 
+/** 导出前最后一次印前复核：按最终纸面与实际印成尺寸汇总 */
+const preflight = computed(() => {
+  void photoVersion.value
+  if (!task.value) return undefined
+  return preflightSheets(
+    task.value,
+    sheets.value,
+    allSizes.value,
+    settings.value.targetDpi,
+    settings.value.blockOnPreflightFail,
+    getItemPhotoRef,
+  )
+})
+
+const pfSummary = computed(() => preflight.value?.summary)
+/** 拦截生效（本机设置开关且存在不达标项）；用户可勾选「我已知情，仍要导出」单次放行 */
+const pfOverride = ref(false)
+const pfBlocked = computed(() => (pfSummary.value?.blocked ?? false) && !pfOverride.value)
+
+function severityOf(p: Placement): PreflightLevel | undefined {
+  return preflight.value?.bySeq.get(p.seq)?.verdict?.level
+}
+
+const flagged = computed(() =>
+  (preflight.value?.list ?? []).filter((r) => r.verdict && !r.verdict.pass),
+)
+
+watch(
+  () => route.params.id,
+  () => {
+    pfOverride.value = false
+  },
+)
+
 function sizeLabelOf(p: Placement): string {
   const t = task.value
   if (!t) return ''
@@ -59,6 +96,11 @@ function guard(): boolean {
   }
   if (!sheets.value.length) {
     message.value = '没有可导出的版面'
+    return false
+  }
+  if (pfBlocked.value) {
+    message.value =
+      '印前预检未通过：存在清晰度不达标的照片。请先处理（换更大的原片 / 调小尺寸），或勾选下方「我已知情，仍要导出」'
     return false
   }
   return true
@@ -195,9 +237,79 @@ function printView() {
       <button class="btn" @click="router.push(`/cut/${task.id}`)">← 裁切步骤</button>
     </div>
 
-    <div v-if="message" class="note no-print" :class="valid ? 'ok' : 'danger'">{{ message }}</div>
+    <div
+      v-if="message"
+      class="note no-print"
+      :class="!valid ? 'danger' : pfBlocked ? 'warn' : 'ok'"
+    >
+      {{ message }}
+    </div>
     <div v-if="!valid" class="note danger no-print">
       手工微调后的排样不满足 guillotine 贯通裁切，导出已停用：{{ task.manual?.message }}
+    </div>
+
+    <div class="card no-print">
+      <h3>
+        导出前 · 印前预检汇总
+        <span class="row tight">
+          <span class="badge ok">过关 {{ pfSummary?.passed ?? 0 }}</span>
+          <span class="badge warn">偏低 {{ pfSummary?.warned ?? 0 }}</span>
+          <span class="badge danger">不足 {{ pfSummary?.dangers ?? 0 }}</span>
+          <span v-if="(pfSummary?.noSource ?? 0) > 0" class="badge">未导底片 {{ pfSummary?.noSource }}</span>
+        </span>
+      </h3>
+      <div class="card-sub">
+        按每张照片最终落在哪张纸、实际印成多大复核；目标清晰度 {{ settings.targetDpi }}dpi，全部在本机计算，底片不上传
+      </div>
+      <div v-if="!pfSummary || pfSummary.checked === 0" class="note">
+        本批 {{ sheets.reduce((a, s) => a + s.placements.length, 0) }} 张照片均未导入底片，未做清晰度预检
+      </div>
+      <div v-else-if="pfSummary.toHandle === 0" class="note ok">
+        本批共 {{ pfSummary.total }} 张：{{ pfSummary.checked }} 张已检并全部过关{{ pfSummary.noSource ? `，${pfSummary.noSource} 张未导底片未检` : '' }}，可以导出。
+      </div>
+      <template v-else>
+        <div class="note" :class="pfSummary.dangers > 0 ? 'danger' : 'warn'">
+          本批共 {{ pfSummary.total }} 张：{{ pfSummary.passed }} 张能过关，{{ pfSummary.toHandle }} 张要处理
+          （偏低 {{ pfSummary.warned }}、严重不足 {{ pfSummary.dangers }}）
+          <template v-if="pfSummary.noSource">，另 {{ pfSummary.noSource }} 张未导底片未检</template>。
+        </div>
+        <table class="data" style="margin-top: 8px">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th class="num">纸</th>
+              <th class="num">实际印成 mm</th>
+              <th class="num">有效/目标 dpi</th>
+              <th class="num">最多能印 mm</th>
+              <th>建议</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in flagged" :key="r.seq">
+              <td class="num">{{ r.seq }}</td>
+              <td class="num">{{ r.sheetIndex + 1 }}</td>
+              <td class="num">{{ r.verdict!.printWMm.toFixed(0) }}×{{ r.verdict!.printHMm.toFixed(0) }}</td>
+              <td class="num">
+                <strong :style="{ color: r.verdict!.level === 'danger' ? 'var(--danger)' : 'var(--warn)' }">
+                  {{ r.verdict!.effectiveDpi.toFixed(0) }}
+                </strong>
+                /{{ r.verdict!.targetDpi }}
+              </td>
+              <td class="num">{{ r.verdict!.maxPrintWMm.toFixed(0) }}×{{ r.verdict!.maxPrintHMm.toFixed(0) }}</td>
+              <td>
+                <strong>{{ r.verdict!.advice.summary }}</strong>
+                <div v-if="r.verdict!.advice.detail" style="font-size: 12px; color: var(--ink-2)">
+                  {{ r.verdict!.advice.detail }}
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <label v-if="settings.blockOnPreflightFail" class="check" style="margin-top: 10px">
+          <input v-model="pfOverride" type="checkbox" />
+          我已知情，仍要按当前版面导出（只本次放行，不改本机设置）
+        </label>
+      </template>
     </div>
 
     <div class="grid sidebar no-print">
@@ -284,6 +396,7 @@ function printView() {
               :safe-edge-mm="task.safeEdgeMm"
               :scale="Math.max(0.5, Math.min(2.2, 700 / paper.wMm))"
               :thumb-of="thumbs"
+              :severity-of="severityOf"
             />
           </div>
         </div>
@@ -304,6 +417,7 @@ function printView() {
           :header-text="task.headerText"
           :footer-text="task.footerText"
           :thumb-of="thumbs"
+          :severity-of="severityOf"
         />
       </div>
       <div class="print-sheet" style="width: 210mm; height: 297mm; padding: 15mm 0 0 15mm">

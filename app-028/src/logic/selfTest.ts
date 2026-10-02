@@ -5,8 +5,16 @@ import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
 import { buildPdf } from './pdf'
+import {
+  coverCropLoss,
+  evaluatePhoto,
+  maxPrintSizeMm,
+  preflightSheets,
+  summarizePlacements,
+  WARN_RATIO,
+} from './preflight'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
-import type { Paper, Placement, Sheet } from './types'
+import type { Paper, PhotoRef, Placement, Sheet, Task } from './types'
 
 export interface AssertionResult {
   id: string
@@ -482,6 +490,173 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 印前清晰度预检：cover 裁切、有效 DPI、最大可印尺寸、建议、拦截汇总、整单复核 */
+export function assertPreflight(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const sizes = BUILTIN_PHOTO_SIZES
+  const s5 = sizes.find((s) => s.id === 's5cun')!
+  const s6 = sizes.find((s) => s.id === 's6cun')!
+  const s1 = sizes.find((s) => s.id === 's1cun')!
+  const s2l = sizes.find((s) => s.id === 's2cun_l')!
+
+  // 用例 A：纵向底片 1000×1400，印 5 寸（89×127mm）@300dpi
+  // 比例接近但不完全一致：cover 裁成 981×1400，有效 DPI = 981/89×25.4 ≈ 280（warn）
+  const refA: PhotoRef = { name: 'a.jpg', wPx: 1000, hPx: 1400, landscape: false }
+  const a = evaluatePhoto(refA, s5.wMm, s5.hMm, false, 300, sizes, s5.id)
+  if (Math.abs(a.cropWPx - 981) > 1 || a.cropHPx !== 1400) {
+    problems.push(`用例A cover 裁切区域应约 981×1400，实际 ${a.cropWPx}×${a.cropHPx}`)
+  }
+  if (Math.abs(a.effectiveDpi - 280) > 0.6) {
+    problems.push(`用例A 有效DPI 应约 280，实际 ${a.effectiveDpi.toFixed(2)}`)
+  }
+  if (a.level !== 'warn' || a.pass) problems.push('用例A：280dpi 落在 [255,300) 应判为偏低')
+  // 同一张底片印 1 寸应达标（cover 损耗约 4%）
+  const a1 = evaluatePhoto(refA, s1.wMm, s1.hMm, false, 300, sizes, s5.id)
+  if (!a1.pass) problems.push('用例A 底片印 1 寸应达标')
+  // 建议「调小」：能通过的最大更小尺寸应是大 2 寸 35×49（5 寸比例照片印 25×35 损耗更大）
+  if (a.advice.kind !== 'shrink' || a.advice.shrinkTo?.id !== s2l.id) {
+    problems.push(`用例A 应建议调小到「大2寸」，实际 ${a.advice.kind}/${a.advice.shrinkTo?.id ?? '—'}`)
+  }
+  // 最大可印尺寸（保持 89:127 比例）：83.07×118.53mm
+  const maxA = maxPrintSizeMm(refA, 89, 127, 300)
+  if (Math.abs(maxA.wMm - 83.067) > 0.02 || Math.abs(maxA.hMm - 118.533) > 0.02) {
+    problems.push(`用例A 最大可印尺寸错误：${maxA.wMm.toFixed(1)}×${maxA.hMm.toFixed(1)}mm`)
+  }
+  if (Math.abs(a.dpiShortfall - 20) > 0.6) problems.push('用例A 离目标应差约 20dpi')
+
+  // 用例 B：小底片 200×280 印 6 寸（102×152）→ 连最小的 1 寸都不达标，只能换更大的原片
+  const refB: PhotoRef = { name: 'b.jpg', wPx: 200, hPx: 280, landscape: false }
+  const b = evaluatePhoto(refB, s6.wMm, s6.hMm, false, 300, sizes, s6.id)
+  if (Math.abs(b.effectiveDpi - 46.8) > 1) {
+    problems.push(`用例B 有效DPI 应约 46.8，实际 ${b.effectiveDpi.toFixed(1)}`)
+  }
+  if (b.level !== 'danger') problems.push(`用例B 应判严重不足（ratio=${b.ratio.toFixed(3)}）`)
+  if (b.advice.kind !== 'enlarge-source') {
+    problems.push(`用例B 连 1 寸都印不清，应建议换更大的原片，实际 ${b.advice.kind}`)
+  }
+  const needW6 = Math.ceil((102 / 25.4) * 300)
+  const needH6 = Math.ceil((152 / 25.4) * 300)
+  if (b.advice.summary.indexOf(`${needW6}×${needH6}`) < 0) {
+    problems.push(`用例B 建议应写明至少需要 ${needW6}×${needH6}px，实际「${b.advice.summary}」`)
+  }
+  const lossB = coverCropLoss(refB, s6.wMm, s6.hMm, false)
+  if (Math.abs(lossB - 0.0605) > 0.005) {
+    problems.push(`用例B cover 损耗应约 6.1%（总像素不够而非比例失配），实际 ${(lossB * 100).toFixed(1)}%`)
+  }
+  // 长宽比失配型：横底片 2000×1300 印竖版 6 寸，裁掉约 56% 且 217dpi 不达标 → 可调小到大 2 寸
+  const refBRatio: PhotoRef = { name: 'br.jpg', wPx: 2000, hPx: 1300, landscape: true }
+  const br = evaluatePhoto(refBRatio, s6.wMm, s6.hMm, false, 300, sizes, s6.id)
+  if (Math.abs(br.effectiveDpi - 217) > 1) problems.push('比例失配用例有效 DPI 应约 217')
+  if (br.level !== 'danger' || br.advice.kind !== 'shrink' || br.advice.shrinkTo?.id !== s2l.id) {
+    problems.push(
+      `比例失配用例应判 danger 并建议调小到大 2 寸，实际 ${br.level}/${br.advice.kind}/${br.advice.shrinkTo?.id ?? '—'}`,
+    )
+  }
+  if (Math.abs(coverCropLoss(refBRatio, s6.wMm, s6.hMm, false) - 0.5638) > 0.005) {
+    problems.push('比例失配用例 cover 损耗应约 56.4%')
+  }
+
+  // 用例 C：横底片 2200×1500，允许旋转后印 5 寸 → 走 127×89 朝向，用 2140×1500，恰好 300dpi 达标
+  const refC: PhotoRef = { name: 'c.jpg', wPx: 2200, hPx: 1500, landscape: true }
+  const c = evaluatePhoto(refC, s5.wMm, s5.hMm, true, 300, sizes, s5.id)
+  if (!c.rotated) problems.push('用例C：旋转方案更优时应标记 rotated')
+  if (Math.abs(c.cropWPx - 2140) > 1.5 || c.cropHPx !== 1500) {
+    problems.push(`用例C 旋转后裁切区域应约 2140×1500，实际 ${c.cropWPx}×${c.cropHPx}`)
+  }
+  if (!c.pass || Math.abs(c.effectiveDpi - 300) > 0.6) {
+    problems.push(`用例C 旋转后应恰好达标 300dpi（实际 ${c.effectiveDpi.toFixed(0)}dpi）`)
+  }
+
+  // 用例 D：warn 下边界——有效 DPI 恰好为目标的 85%（255dpi）
+  // cropW=893.5、比例一致 → 893.5×1275；取 894×1276 实测 ratio≈0.85
+  const refD: PhotoRef = { name: 'd.jpg', wPx: 894, hPx: 1276, landscape: false }
+  const d = evaluatePhoto(refD, s5.wMm, s5.hMm, false, 300, sizes, s5.id)
+  if (d.level !== 'warn') problems.push(`用例D 应判为偏低（ratio=${d.ratio.toFixed(3)}）`)
+  if (Math.abs(d.ratio - WARN_RATIO) > 0.005) problems.push(`用例D ratio 应约 0.85，实际 ${d.ratio.toFixed(3)}`)
+
+  // 用例 E：整单复核必须以排样实际朝向（127×89，rotated）为准，不得在复核阶段重新换方向
+  const refE: PhotoRef = { name: 'e.jpg', wPx: 1200, hPx: 800, landscape: true }
+  const task: Task = {
+    id: 'pf',
+    name: 'pf',
+    paperId: 'p5x7',
+    items: [
+      {
+        id: 'i1',
+        sizeId: 's5cun',
+        qty: 1,
+        rotateAllowed: true,
+        repeatSamePhoto: true,
+        keepTogether: false,
+        photo: refE,
+      },
+    ],
+    gapMm: 0,
+    kerfMm: 0,
+    safeEdgeMm: 0,
+    allowRotate: true,
+    headerText: '',
+    footerText: '',
+    createdAt: 0,
+  }
+  const placement: Placement = { itemId: 'i1', sheetIndex: 0, x: 0, y: 0, w: 127, h: 89, rotated: true, seq: 1 }
+  const sheet: Sheet = {
+    index: 0,
+    placements: [placement],
+    cutSteps: [],
+    rawCutCount: 0,
+    usedAreaMm2: 127 * 89,
+    sheetAreaMm2: 127 * 178,
+    utilization: 0.5,
+    wasteRects: [],
+  }
+  const cache = new Map<string, PhotoRef>([['i1#0', refE]])
+  const bundle = preflightSheets(task, [sheet], sizes, 300, true, (k) => cache.get(k))
+  const v1 = bundle.bySeq.get(1)?.verdict
+  if (!v1 || v1.rotated || v1.printWMm !== 127 || v1.printHMm !== 89) {
+    problems.push('用例E：复核必须以排样实际朝向 127×89 为准，不得重新换方向')
+  }
+  if (Math.abs(v1!.effectiveDpi - 228) > 1) {
+    problems.push(`用例E 实际朝向有效 DPI 应约 228，实际 ${v1?.effectiveDpi.toFixed(0)}`)
+  }
+  if (bundle.summary.checked !== 1 || !bundle.summary.blocked || bundle.summary.dangers !== 1) {
+    problems.push('用例E：应判 1 张严重不足且拦截生效')
+  }
+  // 无底片的印件 → noSource，不计入通过也不计入不达标，不触发拦截
+  const sumNone = summarizePlacements([{ verdict: undefined }, { verdict: undefined }], true)
+  if (sumNone.noSource !== 2 || sumNone.blocked || sumNone.passed !== 0) {
+    problems.push('未导入底片应记为 noSource 且不触发拦截')
+  }
+  // 关闭拦截开关后即使不达标也不拦
+  const bundleOff = preflightSheets(task, [sheet], sizes, 300, false, (k) => cache.get(k))
+  if (bundleOff.summary.blocked) problems.push('拦截开关关闭时 blocked 必须为 false')
+
+  // 用例 F：达标用例不得误报（高像素底片 4000×6000 印 5 寸）
+  const f = evaluatePhoto(
+    { name: 'f', wPx: 4000, hPx: 6000, landscape: false },
+    s5.wMm,
+    s5.hMm,
+    false,
+    300,
+    sizes,
+    s5.id,
+  )
+  if (!f.pass || f.advice.kind !== 'keep') problems.push('用例F：高像素底片应达标且建议为可直接印')
+
+  return {
+    id: 'preflight',
+    title: '⑧ 印前预检：cover 裁切后有效 DPI、最大可印尺寸、调小/换片建议、汇总拦截与整单复核',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : `1000×1400 印 5 寸 cover→981×1400、280dpi 偏低、最多 83×119mm，建议调小到大 2 寸；` +
+        `200×280 印 6 寸仅 47dpi 严重不足，建议换 ≥${needW6}×${needH6}px 原片；横底片印竖版 6 寸裁掉 56% 时建议调小；` +
+        `2200×1500 横底片旋转后恰好 300dpi 达标；warn 边界 85%；整单复核按实际 127×89 朝向判 228dpi 并拦截；无底片不计检`,
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +676,6 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  results.push(assertPreflight())
   return results
 }

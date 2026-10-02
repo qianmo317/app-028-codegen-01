@@ -20,6 +20,7 @@ import {
   templates,
 } from '../store'
 import { findPhotoSize, newId } from '../logic/library'
+import { evaluateItem, summarizePlacements, type PreflightLevel, type PreflightVerdict } from '../logic/preflight'
 import { formatCents, formatPercent } from '../logic/units'
 import type { Item, Paper, PhotoRef, Task } from '../logic/types'
 
@@ -71,6 +72,81 @@ const usableText = computed(() => {
 })
 
 const totalQty = computed(() => draft.items.reduce((a, i) => a + Math.max(0, i.qty), 0))
+
+/** 每张底片在清单当前尺寸下的预检结论（重复排一张底片只算一次） */
+const itemVerdicts = computed(() => {
+  void photoVersion.value
+  const map = new Map<string, PreflightVerdict | undefined>()
+  for (const item of draft.items) {
+    const s = findPhotoSize(allSizes.value, item.sizeId)
+    if (!s) {
+      map.set(item.id, undefined)
+      continue
+    }
+    map.set(
+      item.id,
+      evaluateItem(
+        item,
+        s,
+        draft.allowRotate,
+        settings.value.targetDpi,
+        allSizes.value,
+        getItemPhoto(photoKey(item.id, 0))?.ref ?? item.photo,
+      ),
+    )
+  }
+  return map
+})
+
+function verdictOf(item: Item): PreflightVerdict | undefined {
+  return itemVerdicts.value.get(item.id)
+}
+
+const TARGET_DPI_OPTIONS = [
+  { value: 200, label: '200 dpi · 远观/海报' },
+  { value: 240, label: '240 dpi · 报纸/普通冲印' },
+  { value: 300, label: '300 dpi · 标准冲印（推荐）' },
+  { value: 350, label: '350 dpi · 精印' },
+  { value: 600, label: '600 dpi · 特写/证件照精印' },
+]
+
+/** 汇总按印件数计：一行有 qty 张，但同一个底片只预检一次 → 按底片种类汇总 */
+const preflightSummary = computed(() => {
+  const rows = draft.items
+    .map((i) => ({ verdict: itemVerdicts.value.get(i.id) }))
+    .filter((r) => r.verdict)
+  return summarizePlacements(rows, settings.value.blockOnPreflightFail)
+})
+
+/** 预检未达标的清单行（带建议），供卡片列出 */
+const flaggedItems = computed(() =>
+  draft.items
+    .map((item) => {
+      const v = itemVerdicts.value.get(item.id)
+      const size = findPhotoSize(allSizes.value, item.sizeId)
+      return v && !v.pass ? { item, size, v } : undefined
+    })
+    .filter((x): x is { item: Item; size: ReturnType<typeof findPhotoSize>; v: PreflightVerdict } => !!x),
+)
+
+function levelClass(level: PreflightLevel | undefined): string {
+  if (level === 'pass') return 'ok'
+  if (level === 'warn') return 'warn'
+  if (level === 'danger') return 'danger'
+  return ''
+}
+
+function levelText(level: PreflightLevel | undefined): string {
+  if (level === 'pass') return '达标'
+  if (level === 'warn') return '偏低'
+  if (level === 'danger') return '不足'
+  return '未导底片'
+}
+
+function verdictHint(v: PreflightVerdict): string {
+  if (v.pass) return `有效 ${v.effectiveDpi.toFixed(0)}dpi`
+  return `${v.effectiveDpi.toFixed(0)}/${v.targetDpi}dpi · 最多 ${v.maxPrintWMm.toFixed(0)}×${v.maxPrintHMm.toFixed(0)}mm`
+}
 
 function addItem(sizeId?: string) {
   const size = sizeId ?? allSizes.value[0]?.id
@@ -185,7 +261,7 @@ function addSize() {
   addItem(s.id)
 }
 
-function submit() {
+function submit(force = false) {
   error.value = ''
   hint.value = ''
   if (!draft.items.length) {
@@ -194,6 +270,12 @@ function submit() {
   }
   if (draft.items.some((i) => i.qty <= 0)) {
     error.value = '照片数量必须大于 0'
+    return
+  }
+  const sum = preflightSummary.value
+  if (sum.blocked && !force) {
+    const n = sum.toHandle
+    error.value = `印前预检未通过：${n} 张底片清晰度不达标（偏低 ${sum.warned}、严重不足 ${sum.dangers}）。请按建议换更大的原片或把尺寸调小；如确认要先出排样稿，可点「仍要继续排样」。`
     return
   }
   const task: Task = createTask({
@@ -364,6 +446,7 @@ function taskPaperName(t: Task) {
                 <th>不拆散</th>
                 <th>底片</th>
                 <th>本机照片文件</th>
+                <th>清晰度预检</th>
                 <th></th>
               </tr>
             </thead>
@@ -419,6 +502,20 @@ function taskPaperName(t: Task) {
                   </div>
                 </td>
                 <td>
+                  <span
+                    class="badge"
+                    :class="levelClass(verdictOf(item)?.level)"
+                    :title="verdictOf(item)
+                      ? `裁切后有效 ${verdictOf(item)!.effectiveDpi.toFixed(0)}dpi / 目标 ${settings.targetDpi}dpi`
+                      : '导入底片后在此预检'"
+                  >
+                    {{ levelText(verdictOf(item)?.level) }}
+                  </span>
+                  <div v-if="verdictOf(item)" class="mono" style="font-size: 11px; color: var(--ink-3); margin-top: 2px">
+                    {{ verdictHint(verdictOf(item)!) }}
+                  </div>
+                </td>
+                <td>
                   <button class="btn small danger" @click="removeItem(item.id)">删除</button>
                 </td>
               </tr>
@@ -454,6 +551,94 @@ function taskPaperName(t: Task) {
 
         <div class="card">
           <h3>
+            ④ 印前清晰度预检
+            <span class="row tight">
+              <span class="badge ok">达标 {{ preflightSummary.passed }}</span>
+              <span class="badge warn">偏低 {{ preflightSummary.warned }}</span>
+              <span class="badge danger">不足 {{ preflightSummary.dangers }}</span>
+              <span v-if="preflightSummary.noSource" class="badge">未导底片 {{ preflightSummary.noSource }}</span>
+            </span>
+          </h3>
+          <div class="card-sub">
+            每张底片按清单尺寸先做 cover 裁切、再算实际有效 DPI；像素只在本机内存中读取，不上传、不留副本
+          </div>
+          <div class="grid cols-2">
+            <label class="field">
+              目标清晰度
+              <select v-model.number="settings.targetDpi">
+                <option v-for="o in TARGET_DPI_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </label>
+            <label class="check" style="align-self: end; padding-bottom: 8px" title="不达标时拦住「排样并预览」与最终导出">
+              <input v-model="settings.blockOnPreflightFail" type="checkbox" />
+              拦住不达标的项（新建排样与导出前都生效）
+            </label>
+          </div>
+
+          <div v-if="preflightSummary.checked === 0" class="note" style="margin-top: 10px">
+            还没有可预检的底片：在「本机照片文件」列选入照片后，这里会立刻给出结论
+          </div>
+          <div v-else-if="preflightSummary.toHandle === 0" class="note ok" style="margin-top: 10px">
+            已预检 {{ preflightSummary.checked }} 张底片，裁切后清晰度全部达到 {{ settings.targetDpi }}dpi 目标
+          </div>
+
+          <table v-if="flaggedItems.length" class="data" style="margin-top: 10px">
+            <thead>
+              <tr>
+                <th>底片 / 尺寸</th>
+                <th class="num">像素</th>
+                <th class="num">裁切后有效</th>
+                <th class="num">离目标</th>
+                <th>这张最多能印</th>
+                <th>建议</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in flaggedItems" :key="row.item.id">
+                <td>
+                  <span class="badge" :class="levelClass(row.v.level)">{{ levelText(row.v.level) }}</span>
+                  {{ row.item.photo?.name }}
+                  <div class="mono" style="font-size: 11px; color: var(--ink-3)">
+                    印 {{ row.size?.name }} {{ row.size?.wMm }}×{{ row.size?.hMm }}mm
+                  </div>
+                </td>
+                <td class="mono num">
+                  {{ row.item.photo?.wPx }}×{{ row.item.photo?.hPx }}
+                  <div style="font-size: 11px; color: var(--ink-3)">裁切用 {{ row.v.cropWPx }}×{{ row.v.cropHPx }}</div>
+                </td>
+                <td class="num">
+                  <strong :style="{ color: row.v.level === 'danger' ? 'var(--danger)' : 'var(--warn)' }">
+                    {{ row.v.effectiveDpi.toFixed(0) }}dpi
+                  </strong>
+                  <div class="mono" style="font-size: 11px; color: var(--ink-3)">
+                    {{ (row.v.ratio * 100).toFixed(0) }}%
+                  </div>
+                </td>
+                <td class="num mono">
+                  −{{ row.v.dpiShortfall.toFixed(0) }}dpi
+                  <div style="font-size: 11px; color: var(--ink-3)">缺 {{ row.v.pxShortfallW }}×{{ row.v.pxShortfallH }}px</div>
+                </td>
+                <td class="num mono">
+                  {{ row.v.maxPrintWMm.toFixed(0) }}×{{ row.v.maxPrintHMm.toFixed(0) }}mm
+                  <div v-if="row.v.cropLoss >= 0.08" style="font-size: 11px; color: var(--warn)">
+                    长宽比失配裁掉 {{ (row.v.cropLoss * 100).toFixed(0) }}%
+                  </div>
+                </td>
+                <td>
+                  <div>
+                    <strong>{{ row.v.advice.summary }}</strong>
+                  </div>
+                  <div v-if="row.v.advice.detail" style="font-size: 12px; color: var(--ink-2)">
+                    {{ row.v.advice.detail }}
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>
             开始排样
             <span class="badge">guillotine 约束</span>
           </h3>
@@ -462,7 +647,18 @@ function taskPaperName(t: Task) {
               任务名称
               <input v-model="draft.name" type="text" placeholder="可留空自动命名" />
             </label>
-            <button class="btn primary" @click="submit">排样并预览 →</button>
+            <button class="btn primary" @click="submit(false)">排样并预览 →</button>
+            <button
+              v-if="settings.blockOnPreflightFail && preflightSummary.toHandle > 0"
+              class="btn danger"
+              title="跳过本机预检拦截：仍可先排样，但导出前会再次复核"
+              @click="submit(true)"
+            >
+              仍要继续排样（{{ preflightSummary.toHandle }} 张不达标）
+            </button>
+          </div>
+          <div v-if="settings.blockOnPreflightFail && preflightSummary.toHandle > 0" class="note warn" style="margin-top: 8px">
+            本机设置为「拦住不达标的项」：不处理这些底片将无法进入排样；确定要先出拼版稿可点右侧红色按钮跳过本次拦截。
           </div>
         </div>
 

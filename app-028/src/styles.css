@@ -479,6 +479,40 @@ table.data tr:hover td {
   border-color: var(--danger);
   background: rgba(198, 40, 40, 0.1);
 }
+/* ---------- 印前预检危险程度着色 ---------- */
+.ph.pf-pass {
+  border-color: #2f9e66;
+  background: rgba(26, 127, 75, 0.1);
+}
+.ph.pf-warn {
+  border-color: #d08a1f;
+  background: rgba(210, 138, 31, 0.16);
+}
+.ph.pf-danger {
+  border-color: var(--danger);
+  background: rgba(198, 40, 40, 0.18);
+}
+.ph.pf-strong.pf-warn {
+  border-width: 2px;
+  box-shadow: inset 0 0 0 9999px rgba(210, 138, 31, 0.12);
+}
+.ph.pf-strong.pf-danger {
+  border-width: 2px;
+  box-shadow: inset 0 0 0 9999px rgba(198, 40, 40, 0.16);
+}
+.ph.pf-pass img,
+.ph.pf-warn img,
+.ph.pf-danger img {
+  opacity: 0.72;
+}
+@media print {
+  .ph.pf-warn {
+    outline: 0.3mm dashed #d08a1f;
+  }
+  .ph.pf-danger {
+    outline: 0.3mm dashed var(--danger);
+  }
+}
 .ph img {
   position: absolute;
   inset: 0;

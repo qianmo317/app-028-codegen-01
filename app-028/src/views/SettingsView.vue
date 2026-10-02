@@ -77,6 +77,31 @@ function reset() {
       </div>
 
       <div class="card">
+        <h3>印前清晰度预检</h3>
+        <div class="card-sub">存为本机设置，下次新建任务自动沿用；预检只读取底片像素尺寸，不上传、不留副本</div>
+        <div class="stack">
+          <label class="field" style="max-width: 320px">
+            目标清晰度：{{ settings.targetDpi }} dpi
+            <select v-model.number="settings.targetDpi">
+              <option :value="200">200 dpi · 远观/海报</option>
+              <option :value="240">240 dpi · 报纸/普通冲印</option>
+              <option :value="300">300 dpi · 标准冲印（推荐）</option>
+              <option :value="350">350 dpi · 精印</option>
+              <option :value="600">600 dpi · 特写/证件照精印</option>
+            </select>
+          </label>
+          <div class="note">
+            预检口径：底片按要印尺寸的长宽比先 cover 裁切，再算裁切后实际有效 DPI。
+            有效 DPI ≥ 目标为达标；在目标的 85%~100% 之间标「偏低」（黄色）；低于 85% 标「严重不足」（红色）。
+          </div>
+          <label class="check">
+            <input v-model="settings.blockOnPreflightFail" type="checkbox" />
+            拦住不达标的项：新建任务排样、以及最终导出前，存在「偏低/严重不足」的照片时阻止继续（可在页面上单次跳过）
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>
           第 10 节验收自检
           <span class="row tight">

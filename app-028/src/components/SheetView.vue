@@ -22,6 +22,10 @@ const props = withDefaults(
     footerText?: string
     thumbOf?: (p: Placement) => string | undefined
     labelOf?: (itemId: string) => string
+    /** 印前预检危险程度：按 seq 给每个印件着色 */
+    severityOf?: (p: Placement) => 'pass' | 'warn' | 'danger' | undefined
+    /** 着色强度：'tint' 淡色底（排样/导出预览），'strong' 醒目（拦截提示） */
+    severityStyle?: 'tint' | 'strong'
   }>(),
   {
     safeEdgeMm: 3,
@@ -40,6 +44,8 @@ const props = withDefaults(
     footerText: '',
     thumbOf: undefined,
     labelOf: undefined,
+    severityOf: undefined,
+    severityStyle: 'tint',
   },
 )
 
@@ -177,6 +183,11 @@ const headerFontSize = computed(() => {
 })
 
 const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
+
+function severityClass(p: Placement): string {
+  const level = typeof props.severityOf === 'function' ? props.severityOf(p) : undefined
+  return level ? `pf-${level}` : ''
+}
 </script>
 
 <template>
@@ -213,7 +224,11 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
       v-for="p in sheet.placements"
       :key="p.seq"
       class="ph"
-      :class="{ draggable, invalid, dragging: dragSeq === p.seq }"
+      :class="[
+        { draggable, invalid, dragging: dragSeq === p.seq },
+        severityClass(p),
+        typeof severityOf === 'function' && severityStyle === 'strong' ? 'pf-strong' : '',
+      ]"
       :style="phStyle(p)"
       @pointerdown="onPointerDown($event, p)"
       @pointermove="onPointerMove"

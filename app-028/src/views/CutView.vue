@@ -3,9 +3,19 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SheetView from '../components/SheetView.vue'
 import RulerScale from '../components/RulerScale.vue'
-import { allPapers, getTask, makeThumbResolver, photoVersion, sheetsOf } from '../store'
+import {
+  allPapers,
+  allSizes,
+  getTask,
+  getItemPhotoRef,
+  makeThumbResolver,
+  photoVersion,
+  settings,
+  sheetsOf,
+} from '../store'
 import { resolvePaper } from '../logic/library'
-import type { CutStep, Task } from '../logic/types'
+import { preflightSheets, type PreflightLevel } from '../logic/preflight'
+import type { CutStep, Placement, Task } from '../logic/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,6 +36,24 @@ const thumbs = computed(() => {
   void photoVersion.value
   return task.value ? makeThumbResolver(task.value, sheets.value) : () => undefined
 })
+
+/** 印前复核结论（与排样/导出页同一口径，按最终印件尺寸重算） */
+const preflight = computed(() => {
+  void photoVersion.value
+  if (!task.value) return undefined
+  return preflightSheets(
+    task.value,
+    sheets.value,
+    allSizes.value,
+    settings.value.targetDpi,
+    settings.value.blockOnPreflightFail,
+    getItemPhotoRef,
+  )
+})
+
+function severityOf(p: Placement): PreflightLevel | undefined {
+  return preflight.value?.bySeq.get(p.seq)?.verdict?.level
+}
 
 const scale = computed(() => {
   const p = paper.value
@@ -154,6 +182,7 @@ function goto(routeName: string) {
               :done-count="step"
               :show-cut-labels="true"
               :thumb-of="thumbs"
+              :severity-of="severityOf"
             />
           </div>
         </div>

@@ -37,6 +37,8 @@ export const DEFAULT_SETTINGS: Settings = {
   safeEdgeMm: 3,
   allowRotate: true,
   exportDpi: 300,
+  targetDpi: 300,
+  blockOnPreflightFail: true,
 }
 
 export const customPapers = ref<Paper[]>(loadJSON<Paper[]>(KEY.customPapers, []))
@@ -73,6 +75,11 @@ export function setItemPhoto(key: string, url: string, ref: PhotoRef): void {
 
 export function getItemPhoto(key: string): { url: string; ref: PhotoRef } | undefined {
   return photoCache.get(key)
+}
+
+/** 只取内存底片的像素信息（印前预检用；未导入时回退到清单上已持久化的像素信息） */
+export function getItemPhotoRef(key: string): PhotoRef | undefined {
+  return photoCache.get(key)?.ref
 }
 
 export function clearItemPhoto(key: string): void {

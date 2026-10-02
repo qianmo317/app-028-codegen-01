@@ -153,6 +153,10 @@ export interface Settings {
   safeEdgeMm: number
   allowRotate: boolean
   exportDpi: number
+  /** 印前预检目标清晰度（dpi） */
+  targetDpi: number
+  /** 预检不达标的项是否拦住新建/导出 */
+  blockOnPreflightFail: boolean
 }
 
 export interface PaperTemplate {
